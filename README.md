@@ -23,7 +23,7 @@ The `Release` pipeline is used to deploy planned releases and applys the followi
 - allows for manual validation after Production slot deployment
 - supports deployment of urgent fixes straight to Production, if required (by skipping Preproduction stage) 
 
-### Variables
+## Variable Groups
 
 Create variable groups 'dxp-inte' and 'dxp-release' for the 2 pipelines respectively, with the following variables (Deployment API credentials can be generated from the DXP Portal):
 - ProjectId
