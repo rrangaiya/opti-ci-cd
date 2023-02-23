@@ -1,0 +1,208 @@
+# YAML Pipeline to build and deploy CMS 12+ solutions to Integration environment using Deployment API
+# Expects the following variables in a variable group named dxp-inte
+#    - ApiKey
+#    - ApiSecret
+#    - ProjectId
+#
+# Author: Ron Rangaiya
+# -----------------------------
+
+# Set the pipeline build number format
+name: 'CI.$(Date:yyyyMMdd).$(Rev:r)'
+
+trigger:
+- master
+
+pool:
+  vmimage: 'windows-latest'
+
+parameters:
+- name: directDeploy
+  displayName: Direct Deploy  
+  type: boolean
+  default: true
+  
+variables:
+- template: variables.yml
+- group: dxp-inte
+
+stages:
+- stage: CI
+  jobs:
+  - job: CI
+    displayName: 'Build & package'
+    steps:
+    - task: DotNetCoreCLI@2
+      displayName: 'NuGet Restore'
+      inputs:
+        command: 'restore'
+        projects: '$(projects)'
+        feedsToUse: 'config'
+        nugetConfigPath: 'src/NuGet.config'
+        
+# Run any npm commands to build UI artifacts
+#    - task: Npm@1
+#      displayName: 'Build UI'
+#      inputs:
+#        command: custom
+#        workingDir: ''
+#        verbose: false
+#        customCommand: 'run build'
+
+    - task: DotNetCoreCLI@2
+      displayName: 'Build'
+      inputs:
+        command: 'build'
+        projects: '$(projects)'
+        arguments: '--configuration $(buildConfiguration) --framework $(targetFramework)'
+
+    - task: DotNetCoreCLI@2
+      displayName: 'Test'
+      inputs:
+        command: 'test'
+        projects: '**/*Tests/*.csproj'
+        arguments: '--configuration $(buildConfiguration)'
+
+    - task: DotNetCoreCLI@2
+      displayName: 'Publish output'
+      inputs:
+        command: 'publish'
+        publishWebProjects: true
+        arguments: '--configuration $(BuildConfiguration) --framework $(targetFramework) --output $(Build.ArtifactStagingDirectory)\PackageContent\'
+        zipAfterPublish: false
+        modifyOutputPath: false
+
+    - task: ArchiveFiles@2
+      displayName: 'Zip'
+      inputs:
+        rootFolderOrFile: '$(Build.ArtifactStagingDirectory)\PackageContent\'
+        includeRootFolder: false
+        archiveType: 'zip'
+        archiveFile: '$(Build.ArtifactStagingDirectory)/Packages/$(appName).cms.app.$(appVersion).nupkg'
+        replaceExistingArchive: true  
+
+    - task: PublishPipelineArtifact@1
+      displayName: 'Publish artifact'
+      inputs:
+        targetPath: '$(Build.ArtifactStagingDirectory)/Packages'
+        artifact: '$(artifactName)'
+        publishLocation: 'pipeline'
+
+    #[Optional] Add Task to zip commerce package
+
+    - task: PowerShell@2
+      displayName: 'Upload package to DXP'
+      env:
+        # Map secret variable
+        API_SECRET: $(ApiSecret)
+      inputs:
+        targetType: 'inline'
+        script: |
+          $env:PSModulePath = "C:\Modules\azurerm_6.13.1;" + $env:PSModulePath
+          
+          if (-not (Get-Module -Name EpiCloud -ListAvailable)) {
+              Install-Module EpiCloud -Scope CurrentUser -Force
+          }
+          
+          Connect-EpiCloud -ClientKey $(ApiKey) -ClientSecret $env:API_SECRET -ProjectId $(ProjectId)
+          
+          $packagePath = "$(Build.ArtifactStagingDirectory)\Packages\$(appName).cms.app.$(appVersion).nupkg"
+          
+          $saslink = Get-EpiDeploymentPackageLocation
+          
+          Add-EpiDeploymentPackage -SasUrl $saslink -Path $packagePath
+          
+          #[Optional] Upload commerce package
+          
+- stage: Integration 
+  jobs:
+    # Add a Deployment job. 
+    # Artifacts are automatically downloaded in deployment jobs. To disable use -download: none
+  - deployment: DeployApp
+    displayName: 'Deploy to Integration' 
+    # Creates an environment if it doesn’t exist
+    environment: 'Integration'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - download: none
+
+          - task: PowerShell@2
+            displayName: 'Deploy to slot'
+            env:
+              API_SECRET: $(ApiSecret)
+            inputs:
+              targetType: 'inline'
+              script: |
+                if (-not (Get-Module -Name EpiCloud -ListAvailable)) {
+                    Install-Module EpiCloud -Scope CurrentUser -Force
+                }
+                
+                Connect-EpiCloud -ClientKey $(ApiKey) -ClientSecret $env:API_SECRET -ProjectId $(ProjectId)
+                
+                $packageName = "$(appName).cms.app.$(appVersion).nupkg" #[Optional] add commerce package if applicable
+                
+                echo "Starting deployment using package $packageName" 
+                
+                $params = @{
+                  DeploymentPackage = $packageName
+                  TargetEnvironment = 'Integration'
+                  UseMaintenancePage = $false
+                  Wait = $true
+                }
+                
+                if (${{ parameters.directDeploy }} -eq $true){   
+                  $params.Add("DirectDeploy", $true)                   
+                }             
+                
+                $deploy = Start-EpiDeployment @params
+
+                echo "DeploymentId - $($deploy.id)" 
+                echo "##vso[task.setvariable variable=deploymentId;]$($deploy.id)"
+                
+          - task: PowerShell@2
+            displayName: 'Validate slot'
+            condition: and(succeeded(), eq('${{ parameters.directDeploy }}', false))
+            env:
+              API_SECRET: $(ApiSecret)
+            inputs:
+              targetType: 'inline'
+              script: |
+                Connect-EpiCloud -ClientKey $(ApiKey) -ClientSecret $env:API_SECRET -ProjectId $(ProjectId)
+                
+                $deploy = Get-EpiDeployment -Id $env:DeploymentId
+                
+                if ($deploy.status -eq 'AwaitingVerification'){
+                  $response = Invoke-WebRequest -Uri $deploy.validationLinks[0]
+                  if ($response.StatusCode -ne 200){
+                    echo "Smoke test of slot url failed"
+                    exit 1
+                  }
+                }
+                
+          - task: PowerShell@2
+            displayName: 'Reset'
+            condition: and(failed(), eq('${{ parameters.directDeploy }}', false))
+            env:
+              API_SECRET: $(ApiSecret)            
+            inputs:
+              targetType: 'inline'
+              script: |
+                Connect-EpiCloud -ClientKey $(ApiKey) -ClientSecret $env:API_SECRET -ProjectId $(ProjectId)
+                
+                Reset-EpiDeployment -Id $env:DeploymentId -Wait
+                
+          - task: PowerShell@2
+            displayName: 'Complete deployment'
+            condition: and(succeeded(), eq('${{ parameters.directDeploy }}', false))
+            env:
+              API_SECRET: $(ApiSecret)
+            inputs:
+              targetType: 'inline'
+              script: |
+                Connect-EpiCloud -ClientKey $(ApiKey) -ClientSecret $env:API_SECRET -ProjectId $(ProjectId)
+                
+                Complete-EpiDeployment -Id $env:DeploymentId -Wait
+          
+         
