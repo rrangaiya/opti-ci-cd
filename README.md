@@ -5,6 +5,8 @@ Multi-stage pipelines allow for combined build and deploy processes in a single 
 
 The pipelines are ideal for projects using a trunk based branching strategy, however the triggers can be tweaked to work with other branching models.
 
+There are 2 pipelines, `Integration` and `Release`, which allows for concurrent development of consecutive releases workflows.
+
 ## Continuous Integration
 
 The `Integration` pipeline supports direct deploy to the Integration environment using the Deployment API code package approach. This is the recommended approach to deploying to Integration.
@@ -13,7 +15,7 @@ The Integration pipeline is triggered when code is merged to `master` and perfor
 
 ## Release
 
-The `Release` pipeline is used to deploy planned releases and applys a Release workflow which allows for concurrent development of consecutive releases to continue in Integration. It 
+The `Release` pipeline is used to deploy planned releases and applys the following Release workflow to deploy to Preproduction and Production environments:
 - is triggered on any change to `release/*` branch. Use consistent naming convention for release branch name e.g. `release/1.0` for deployment history purposes.
 - creates a Nuget package and uploads it to the Optimizely DXP for deployment. The package name will be in the format _[app name].cms.app.<releasebranchname.buildnumber.revision>.nupkg_, e.g. customer.cms.app.1.0.20200527.1.nupkg
 - allows for staged code deployments to Preproduction and Production environments (upon approval) 
